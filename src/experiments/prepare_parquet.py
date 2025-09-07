@@ -18,7 +18,7 @@ from typing import List, Dict, Any
 
 import pandas as pd
 
-from ..data.make_dataset import normalize_jsonl, generate_toy_jsonl, load_jsonl if False else None
+from ..data.make_dataset import normalize_jsonl, generate_toy_jsonl
 from ..data.feature_encoders import FeatureEncoder
 
 # NOTE: we avoid heavy imports at global scope; just use FeatureEncoder
