@@ -1,0 +1,59 @@
+[
+  {
+    "file": "data/features\\features_k1.parquet",
+    "families": [
+      "global"
+    ],
+    "n_features": 6
+  },
+  {
+    "file": "data/features\\features_k2.parquet",
+    "families": [
+      "global",
+      "per_qubit_agg"
+    ],
+    "n_features": 6
+  },
+  {
+    "file": "data/features\\features_k3.parquet",
+    "families": [
+      "global",
+      "per_qubit_agg",
+      "local_density"
+    ],
+    "n_features": 6
+  },
+  {
+    "file": "data/features\\features_k4.parquet",
+    "families": [
+      "global",
+      "per_qubit_agg",
+      "local_density",
+      "graph_spectral"
+    ],
+    "n_features": 6
+  },
+  {
+    "file": "data/features\\features_k5.parquet",
+    "families": [
+      "global",
+      "per_qubit_agg",
+      "local_density",
+      "graph_spectral",
+      "noise_stats"
+    ],
+    "n_features": 6
+  },
+  {
+    "file": "data/features\\features_k6.parquet",
+    "families": [
+      "global",
+      "per_qubit_agg",
+      "local_density",
+      "graph_spectral",
+      "noise_stats",
+      "derived_interactions"
+    ],
+    "n_features": 6
+  }
+]

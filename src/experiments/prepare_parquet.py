@@ -10,7 +10,9 @@ This script will write files like:
   data/features/features_k1.parquet, features_k2.parquet, ...
 and a manifest `data/features/manifest.json` describing which family set corresponds to each file.
 """
-
+import json
+import numpy as np
+import pandas as pd
 import os
 import json
 import argparse
@@ -43,10 +45,89 @@ def load_jsonl_to_list(path: str) -> List[Dict[str, Any]]:
     return out
 
 
-def write_parquet(df: pd.DataFrame, out_path: str):
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    df.to_parquet(out_path)
 
+
+def _find_complex_columns(df, n_sample=50):
+    """
+    Return list of columns that contain list/dict/ndarray/tuple in the first n_sample non-null values.
+    """
+    complex_cols = []
+    for col in df.columns:
+        # sample some non-null values for speed
+        try:
+            nonnull = df[col].dropna().head(n_sample).tolist()
+        except Exception:
+            # if dropna fails for some exotic dtype, treat column as complex
+            complex_cols.append(col)
+            continue
+        if not nonnull:
+            continue
+        for v in nonnull:
+            if isinstance(v, (list, dict, tuple, np.ndarray)):
+                complex_cols.append(col)
+                break
+    return complex_cols
+
+def _serialize_complex_columns(df, cols):
+    """
+    Convert each column in cols to JSON strings (null preserved).
+    """
+    for col in cols:
+        def _convert(x):
+            if x is None or (isinstance(x, float) and pd.isna(x)):
+                return None
+            if isinstance(x, np.ndarray):
+                x = x.tolist()
+            try:
+                return json.dumps(x)
+            except TypeError:
+                return json.dumps(str(x))
+        # apply conversion; keep dtype object (strings/None)
+        df[col] = df[col].apply(_convert)
+    return df
+
+def write_parquet_safe(df, out_path, **to_parquet_kwargs):
+    """
+    Write df to parquet, serializing complex object columns to JSON strings so pyarrow doesn't fail.
+    Falls back to printing diagnostics if write fails.
+    """
+    # Make a safe copy
+    df = df.copy()
+
+    # ensure deterministic column order (helps with scaler/pca reproducibility)
+    try:
+        df = df.reindex(sorted(df.columns), axis=1)
+    except Exception:
+        pass
+
+    # Identify complex columns (lists/dicts/ndarrays)
+    complex_cols = _find_complex_columns(df)
+    if complex_cols:
+        print(f"[prepare_parquet] converting complex columns to JSON strings before writing: {complex_cols}")
+        df = _serialize_complex_columns(df, complex_cols)
+
+    # default options
+    to_parquet_kwargs.setdefault("index", False)
+
+    # Try writing
+    try:
+        df.to_parquet(out_path, **to_parquet_kwargs)
+        print(f"[prepare_parquet] wrote parquet: {out_path} (rows={len(df)})")
+    except Exception as e:
+        # Diagnostic output to help debugging
+        print("[prepare_parquet] Failed to write parquet; diagnostics follow:")
+        print(" -> Exception:", repr(e))
+        print(" -> DataFrame dtypes:")
+        print(df.dtypes)
+        print(" -> First 5 rows (as dicts):")
+        try:
+            print(df.head(5).to_dict(orient='records'))
+        except Exception as ee:
+            print("   (could not convert sample rows)", ee)
+        # Re-raise to keep original behavior
+        raise
+
+write_parquet = write_parquet_safe
 
 def prepare_parquets(raw_jsonl: str, out_dir: str, pca_components: int = 2, families_list: List[List[str]] = None):
     if families_list is None:

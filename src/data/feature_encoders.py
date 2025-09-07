@@ -23,7 +23,12 @@ Expected input (per-example): a dict with keys (examples below):
 This file is a starting template — extend features as needed. Keep feature names
 stable when you run experiments so results are reproducible.
 """
-
+import os
+import pathlib
+import json
+import numpy as np
+import pandas as pd
+from pandas import json_normalize
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import pandas as pd
@@ -79,9 +84,102 @@ class FeatureEncoder:
         self._fitted = False
 
         # internal fitted objects
-        self.scaler: Optional[Any] = None
-        self.pca: Optional[Any] = None
+        self.scaler = None
+        self.numeric_cols = None
+        self.pca = None
+        self.pca_cols = None
         self.feature_names_: List[str] = []
+        
+
+    def _build_df(self, dataset, hardware_meta=None):
+        """
+        Build a pandas DataFrame from the provided dataset input.
+
+        Accepts:
+        - dataset: list of dicts (typical), or a path to a JSONL file, or a pandas.DataFrame.
+        - hardware_meta: optional, currently ignored here (kept for API compatibility).
+
+        Returns:
+        - DataFrame with deterministic column ordering and numeric NaNs filled with 0.0.
+        Notes:
+        - If the class already implements a higher-level encoder method like `encode_dataset`
+            or `encode_examples`, this method will try to call it first.
+        """
+        # If the class provides a dedicated encoder, prefer that (keeps existing logic)
+        if hasattr(self, "encode_dataset") and callable(getattr(self, "encode_dataset")):
+            try:
+                df = self.encode_dataset(dataset, hardware_meta=hardware_meta)
+                if isinstance(df, pd.DataFrame):
+                    # ensure deterministic column order
+                    df = df.reindex(sorted(df.columns), axis=1)
+                    return df
+            except Exception:
+                # fall back to generic processing below
+                pass
+
+        # If dataset is already a DataFrame, copy and normalize columns
+        if isinstance(dataset, pd.DataFrame):
+            df = dataset.copy()
+        else:
+            # If dataset is a path to a file, try to read JSONL or JSON
+            if isinstance(dataset, (str, pathlib.Path)) and os.path.exists(str(dataset)):
+                p = str(dataset)
+                # try JSONL first
+                try:
+                    rows = []
+                    with open(p, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            rows.append(json.loads(line))
+                    df = json_normalize(rows)
+                except Exception:
+                    # fallback to generic json read
+                    try:
+                        with open(p, 'r', encoding='utf-8') as f:
+                            obj = json.load(f)
+                        if isinstance(obj, list):
+                            df = json_normalize(obj)
+                        else:
+                            df = json_normalize([obj])
+                    except Exception:
+                        # final fallback: empty df
+                        df = pd.DataFrame()
+            else:
+                # assume it's an iterable of dict-like examples
+                try:
+                    df = json_normalize(list(dataset))
+                except Exception:
+                    # last resort: try constructing DataFrame directly
+                    try:
+                        df = pd.DataFrame(dataset)
+                    except Exception:
+                        df = pd.DataFrame()
+
+        # Ensure stable column order (sorted) to avoid scaler/order mismatch
+        if not df.empty:
+            df = df.reindex(sorted(df.columns), axis=1)
+
+        # Fill numeric NaNs with 0.0 to keep shapes stable for scaler/PCA transforms
+        try:
+            num_cols = df.select_dtypes(include=[np.number]).columns
+            if len(num_cols) > 0:
+                df[num_cols] = df[num_cols].fillna(0.0)
+        except Exception:
+            # be defensive: ignore if select_dtypes fails
+            pass
+
+        # For non-numeric columns, replace NaN with empty string to avoid unexpected objects
+        try:
+            obj_cols = df.select_dtypes(include=['object', 'string']).columns
+            if len(obj_cols) > 0:
+                df[obj_cols] = df[obj_cols].fillna('')
+        except Exception:
+            pass
+
+        return df
+    
 
     def fit(self, dataset: List[Dict[str, Any]], hardware_meta: Optional[Dict[str, Any]] = None):
         """Fit internal transformations (scaler, PCA) using dataset.
@@ -89,30 +187,32 @@ class FeatureEncoder:
         dataset: list of example dicts (see module docstring)
         hardware_meta: optional global hardware calibration info (dict)
         """
-        # build raw features first to discover dimensionality
-        df = self._build_dataframe(dataset, hardware_meta, apply_pca=False)
-
-        # fit scaler on numeric columns
+        # build dataframe for this dataset & current families
+        df = self._build_df(dataset, hardware_meta)   # however your code builds df
+        # determine numeric columns once and store
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        if StandardScaler is not None and len(numeric_cols) > 0:
+        self.numeric_cols = numeric_cols
+
+        # fit scaler if applicable
+        if StandardScaler is not None and len(self.numeric_cols) > 0:
             self.scaler = StandardScaler()
-            self.scaler.fit(df[numeric_cols].values)
+            self.scaler.fit(df[self.numeric_cols].values)
         else:
             self.scaler = None
 
-        # fit PCA on derived interaction block if requested
+        # if using PCA on a particular block, compute & store pca_cols and fit pca
         if self.pca_components is not None and 'derived_interactions' in self.families:
+            derived_cols = [c for c in df.columns if c.startswith('DI_')]
+            self.pca_cols = derived_cols
             if PCA is None:
                 raise RuntimeError('sklearn not available: cannot run PCA')
-            # find columns that are derived interactions by name prefix
-            derived_cols = [c for c in df.columns if c.startswith('DI_')]
-            if len(derived_cols) == 0:
-                self.pca = None
-            else:
-                self.pca = PCA(n_components=min(self.pca_components, len(derived_cols)))
-                self.pca.fit(df[derived_cols].values)
+            self.pca = PCA(n_components=self.pca_components)
+            # PCA expects a numeric array — use only derived_cols
+            if len(self.pca_cols) > 0:
+                self.pca.fit(df[self.pca_cols].values)
         else:
             self.pca = None
+            self.pca_cols = []
 
         # save feature names in post-transform order
         df2 = self._build_dataframe(dataset, hardware_meta, apply_pca=True)
@@ -120,26 +220,48 @@ class FeatureEncoder:
         self._fitted = True
         return self
 
-    def transform(self, dataset: List[Dict[str, Any]], hardware_meta: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-        """Transform dataset into features. Must call fit() first to capture scaler/PCA state."""
-        if not self._fitted:
-            raise RuntimeError('FeatureEncoder must be fitted before transform()')
-        df = self._build_dataframe(dataset, hardware_meta, apply_pca=True)
+    def transform(self, dataset, hardware_meta=None):
+        """
+        Transform dataset using previously fitted scaler/pca etc.
+        IMPORTANT: uses stored self.numeric_cols / self.pca_cols to ensure shape consistency.
+        """
+        df = self._build_df(dataset, hardware_meta)  # builds same-named-feature df
+        # if scaler was fitted, apply on the same columns in same order
+        if self.scaler is not None and self.numeric_cols:
+            # Ensure all expected columns exist in df; if missing, add zeros (or nan->0) to keep shape
+            missing = [c for c in self.numeric_cols if c not in df.columns]
+            if missing:
+                # create missing columns with zeros so transform shape matches (or choose other fallback)
+                for c in missing:
+                    df[c] = 0.0
+            # Apply scaler to the stored columns in the stored order
+            df[self.numeric_cols] = self.scaler.transform(df[self.numeric_cols].values)
 
-        # apply scaler if present (only to numeric cols)
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        if self.scaler is not None and len(numeric_cols) > 0:
-            df[numeric_cols] = self.scaler.transform(df[numeric_cols].values)
+        # If PCA was fitted, transform using stored pca and replace pca_cols by pca features
+        if self.pca is not None and self.pca_cols:
+            missing_pca = [c for c in self.pca_cols if c not in df.columns]
+            if missing_pca:
+                for c in missing_pca:
+                    df[c] = 0.0
+            pca_vals = self.pca.transform(df[self.pca_cols].values)
+            # replace the pca_cols block with new columns name 'DI_pca_0'.. etc.
+            for i in range(pca_vals.shape[1]):
+                df[f'DI_PCA_{i}'] = pca_vals[:, i]
+            # optionally drop original pca_cols
+            df.drop(columns=self.pca_cols, inplace=True, errors='ignore')
 
-        # reorder to the fitted column ordering (for reproducibility)
-        df = df.reindex(columns=self.feature_names_)
         return df
 
-    def fit_transform(self, dataset: List[Dict[str, Any]], hardware_meta: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-        self.fit(dataset, hardware_meta)
-        return self.transform(dataset, hardware_meta)
-
+    def fit_transform(self, dataset, hardware_meta=None):
+        # Ensure fit stores column lists and transform uses them
+        self.fit(dataset, hardware_meta=hardware_meta)
+        return self.transform(dataset, hardware_meta=hardware_meta)
+    
     def _build_dataframe(self, dataset: List[Dict[str, Any]], hardware_meta: Optional[Dict[str, Any]], apply_pca: bool) -> pd.DataFrame:
+        """
+        Build DataFrame by encoding each example. Optionally apply PCA to DI_ columns.
+        This function ensures PCA fit/transform is handled safely and avoids double-dropping columns.
+        """
         rows = []
         col_names = None
         for ex in dataset:
@@ -147,18 +269,48 @@ class FeatureEncoder:
             if col_names is None:
                 col_names = list(feat_vec.keys())
             rows.append(feat_vec)
+
+        # If no columns (empty dataset), return empty DataFrame
+        if col_names is None:
+            return pd.DataFrame()
+
         df = pd.DataFrame(rows, columns=col_names)
 
-        # optionally apply PCA to derived interaction columns
-        if apply_pca and self.pca is not None:
+        # Ensure deterministic column order (helps reproducibility)
+        try:
+            df = df.reindex(sorted(df.columns), axis=1)
+        except Exception:
+            pass
+
+        # Optionally apply PCA to derived interaction columns (DI_*)
+        if apply_pca and (self.pca is not None or getattr(self, "pca_components", None)):
             derived_cols = [c for c in df.columns if c.startswith('DI_')]
             if len(derived_cols) > 0:
-                pcs = self.pca.transform(df[derived_cols].values)
-                # drop original derived columns and add PCA columns in place
-                df.drop(columns=derived_cols, inplace=True)
-                for i in range(pcs.shape[1]):
-                    df[f'PCA_DI_{i}'] = pcs[:, i]
+                # Lazy-init PCA if not yet created
+                if self.pca is None and getattr(self, "pca_components", None):
+                    from sklearn.decomposition import PCA as _PCA
+                    self.pca = _PCA(n_components=self.pca_components)
+
+                # Prepare numeric data for PCA
+                col_data = df[derived_cols].fillna(0.0).values
+
+                # Fit PCA if it hasn't been fitted yet
+                if self.pca is not None and not hasattr(self.pca, "components_"):
+                    try:
+                        self.pca.fit(col_data)
+                    except Exception as e:
+                        raise RuntimeError(f"PCA fit failed on derived columns ({len(derived_cols)} cols): {e}")
+
+                # If PCA is ready, transform and insert new PCA columns
+                if self.pca is not None and hasattr(self.pca, "components_"):
+                    pcs = self.pca.transform(col_data)
+                    for i in range(pcs.shape[1]):
+                        df[f'DI_PCA_{i}'] = pcs[:, i]
+                    # Drop original derived columns once (errors='ignore' to avoid KeyError)
+                    df.drop(columns=derived_cols, inplace=True, errors='ignore')
+
         return df
+
 
     def _encode_example(self, ex: Dict[str, Any], hardware_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Encode a single example into a flat dict of features."""
