@@ -1,0 +1,43 @@
+# Placeholder for draft.tex
+
+% Conference paper skeleton for ML-QEM boosting + feature-splitting experiments
+\documentclass\[conference]{IEEEtran}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\title{Boosted Trees and Feature Group Ensembles for Machine-Learned Quantum Error Mitigation}
+\author{Author Name \\\small Affiliation}
+\begin{document}
+\maketitle
+\begin{abstract}
+This work studies the use of boosted tree models and feature-group ensemble strategies for machine-learned quantum error mitigation (ML-QEM). Building on prior ML-QEM methods, we (1) compare boosted models (XGBoost, LightGBM, CatBoost) against Random Forests and neural baselines; (2) analyze mitigation performance as a function of feature set size; and (3) introduce a feature-grouping approach that assigns specialized models to feature blocks and aggregates their predictions. We evaluate our approach in simulation and on IBM hardware, and show that ... (TODO: fill after experiments).
+\end{abstract}
+\section{Introduction}
+\section{Related Work}
+\section{Background: ML-QEM}
+\section{Method}
+\subsection{Feature engineering}
+Describe families: global, per-qubit, local density, spectral, noise stats, derived interactions. Explain splitting strategies: by family, by block, by clustering.
+\subsection{Model zoo}
+Describe models and tuning.
+\subsection{Group ensemble and aggregation}
+Explain weighted aggregation and stacking with out-of-fold predictions.
+\section{Experimental Setup}
+Datasets: simulation and hardware. Metrics: RMSE, MAE, runtime. Reproducibility: seeds, release code.
+\section{Results}
+\subsection{Baseline reproduction}
+\subsection{Error vs feature count}
+\includegraphics\[width=0.9\linewidth]{results/figures/figure\_error\_vs\_features.png}
+\subsection{Group-ensemble results}
+Table: best model per bucket (include CSV as table)
+\section{Analysis and Ablations}
+Feature importances, sensitivity to training size, cross-device generalization.
+\section{Conclusion}
+\section\*{Acknowledgements}
+\appendix
+\section{Hyperparameters}
+Include ranges and final values.
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+\end{document}

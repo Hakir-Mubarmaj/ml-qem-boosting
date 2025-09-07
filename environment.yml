@@ -1,0 +1,13 @@
+name: ml-qem-boosting
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - numpy
+    - pandas
+    - scikit-learn
+    - xgboost
+    - lightgbm
+    - catboost
+    - matplotlib
+    - jupyter
