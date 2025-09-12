@@ -45,6 +45,56 @@ DEFAULT_FAMILIES = [
     'derived_interactions',
 ]
 
+def _find_complex_columns(df, n_sample=50):
+    complex_cols = []
+    for col in df.columns:
+        try:
+            nonnull = df[col].dropna().head(n_sample).tolist()
+        except Exception:
+            complex_cols.append(col)
+            continue
+        if not nonnull:
+            continue
+        for v in nonnull:
+            if isinstance(v, (list, dict, tuple, np.ndarray)):
+                complex_cols.append(col)
+                break
+    return complex_cols
+
+def _serialize_complex_columns(df, cols):
+    for col in cols:
+        def _convert(x):
+            if x is None or (isinstance(x, float) and pd.isna(x)):
+                return None
+            if isinstance(x, np.ndarray):
+                x = x.tolist()
+            try:
+                return json.dumps(x)
+            except TypeError:
+                return json.dumps(str(x))
+        df[col] = df[col].apply(_convert)
+    return df
+
+def dataset_to_parquet(df: pd.DataFrame, out_path: str, **to_parquet_kwargs):
+    """
+    Safely write DataFrame to parquet: serialize list/dict/ndarray columns to JSON strings first.
+    """
+    df = df.copy()
+    # deterministic order
+    try:
+        df = df.reindex(sorted(df.columns), axis=1)
+    except Exception:
+        pass
+
+    complex_cols = _find_complex_columns(df)
+    if complex_cols:
+        print(f"[run_feature_sweep] serializing complex columns before parquet write: {complex_cols}")
+        df = _serialize_complex_columns(df, complex_cols)
+
+    to_parquet_kwargs.setdefault("index", False)
+    df.to_parquet(out_path, **to_parquet_kwargs)
+    print(f"[run_feature_sweep] Wrote parquet: {out_path} (rows={len(df)})")
+
 
 def load_raw_jsonl(path: str) -> List[Dict[str, Any]]:
     out = []
@@ -80,11 +130,6 @@ def make_toy_dataset(n_samples: int = 200) -> List[Dict[str, Any]]:
         target = float(q * 0.1 + len(gates) * 0.01 + rng.randn() * 0.05)
         data.append({'id': f'toy_{i}', 'n_qubits': q, 'gates': gates, 'two_qubit_edges': two, 'noisy_expectations': noisy, 'target': target})
     return data
-
-
-def dataset_to_parquet(df: pd.DataFrame, out_path: str):
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    df.to_parquet(out_path)
 
 
 def run_sweep(raw_dataset: List[Dict[str, Any]], out_dir: str, models: List[str], pca_components: int = 2, tune: bool = False, trials: int = 30):
@@ -125,49 +170,89 @@ def run_sweep(raw_dataset: List[Dict[str, Any]], out_dir: str, models: List[str]
                 out_base = os.path.join(out_dir, 'models')
                 # call the trainer API; it will save runs in experiments/runs under out_base
                 meta = trainer_module.train_and_tune(model_key=model_key, X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val, out_base=out_base, tune=tune, n_trials=trials, param_space=None)
-                # evaluate on test set (attempt to load saved model if possible)
+                # --- start patch: compute/verify val_score and test_rmse if missing ---
                 run_path = meta.get('run_path')
-                # try to load model predictions via wrapper predict
-                # we'll attempt to load the saved model (model.pkl or joblib) and the wrapper to predict
                 test_rmse = None
-                try:
-                    # wrapper class
-                    wrapper_cls = trainer_module.MODEL_REGISTRY.get(model_key)
-                    if wrapper_cls is not None:
-                        wrapper = wrapper_cls()
-                        # load saved model object
+                val_score = meta.get('val_score')
+
+                if run_path:
+                    try:
+                        # get wrapper class if exists
+                        wrapper_cls = getattr(trainer_module, "MODEL_REGISTRY", {}).get(model_key)
+                        wrapper = wrapper_cls() if wrapper_cls is not None else None
+
+                        # find candidate model files
+                        import glob, joblib, pickle
+                        candidates = glob.glob(os.path.join(run_path, '*.joblib')) \
+                                + glob.glob(os.path.join(run_path, '*.pkl')) \
+                                + glob.glob(os.path.join(run_path, 'model.*')) \
+                                + glob.glob(os.path.join(run_path, '*.sav'))
                         model_obj = None
-                        # look for model file
-                        import glob, pickle
-                        candidates = glob.glob(os.path.join(run_path, '*.joblib')) + glob.glob(os.path.join(run_path, '*.pkl'))
                         if candidates:
-                            with open(candidates[0], 'rb') as f:
+                            p = candidates[0]
+                            try:
+                                model_obj = joblib.load(p)
+                            except Exception:
                                 try:
-                                    model_obj = pickle.load(f)
+                                    with open(p, 'rb') as f:
+                                        model_obj = pickle.load(f)
+                                except Exception as e:
+                                    logger.debug("failed to load model file %s: %s", p, e)
+
+                        # helper to get predictions robustly
+                        def safe_predict(mobj, X):
+                            # try wrapper.predict first
+                            if wrapper is not None:
+                                try:
+                                    return wrapper.predict(mobj, X)
                                 except Exception:
-                                    import joblib
+                                    logger.debug("wrapper.predict failed for %s", model_key)
+                            # fallback to model_obj.predict
+                            try:
+                                return mobj.predict(X)
+                            except Exception as e:
+                                logger.debug("model_obj.predict failed: %s", e)
+                                raise
 
-                                    model_obj = joblib.load(candidates[0])
+                        from ..models.utils import regression_metrics
+
                         if model_obj is not None:
-                            preds = wrapper.predict(model_obj, X_test)
-                            from ..models.utils import regression_metrics
+                            # compute val_score if missing
+                            if val_score is None:
+                                try:
+                                    preds_val = safe_predict(model_obj, X_val)
+                                    val_metrics = regression_metrics(preds_val, y_val)
+                                    val_score = val_metrics.get('rmse')
+                                    logger.info("Computed val_score for %s at %s -> %s", model_key, run_path, val_score)
+                                except Exception as e:
+                                    logger.warning("Could not compute val_score for %s: %s", model_key, e)
 
-                            metrics = regression_metrics(preds, y_test)
-                            test_rmse = metrics.get('rmse')
-                except Exception as e:
-                    logger.warning('Could not evaluate test RMSE for model %s: %s', model_key, str(e))
+                            # compute test_rmse if missing
+                            try:
+                                preds_test = safe_predict(model_obj, X_test)
+                                test_metrics = regression_metrics(preds_test, y_test)
+                                test_rmse = test_metrics.get('rmse')
+                                logger.info("Computed test_rmse for %s at %s -> %s", model_key, run_path, test_rmse)
+                            except Exception as e:
+                                logger.warning("Could not compute test_rmse for %s: %s", model_key, e)
 
+                    except Exception as e:
+                        logger.warning('Could not evaluate model files at %s for model %s: %s', run_path, model_key, e)
+
+                # update rec with possibly computed val_score/test_rmse
                 rec = {
                     'families': '|'.join(families),
                     'n_families': len(families),
                     'n_features': n_features,
                     'model': model_key,
                     'train_run_path': meta.get('run_path'),
-                    'val_score': meta.get('val_score'),
+                    'val_score': val_score,
                     'test_rmse': test_rmse,
                     'duration_sec': meta.get('duration_sec'),
                     'timestamp': meta.get('timestamp'),
                 }
+                # --- end patch ---
+
                 results.append(rec)
                 # persist intermediate CSV
                 pd.DataFrame(results).to_csv(os.path.join(out_dir, 'sweep_results.csv'), index=False)

@@ -10,7 +10,7 @@ import numpy as np
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-
+from sklearn.metrics import mean_squared_error as _mse
 
 class RFWrapper:
     def __init__(self):
@@ -30,7 +30,8 @@ class RFWrapper:
         model = self._make_model(params)
         model.fit(X_train, y_train)
         preds = model.predict(X_val)
-        rmse = float(mean_squared_error(y_val, preds, squared=False))
+        mse = _mse(y_val, preds)   # mean squared error
+        rmse = float(np.sqrt(mse))
         mae = float(mean_absolute_error(y_val, preds))
         return {'model': model, 'metrics': {'rmse': rmse, 'mae': mae}}
 
@@ -41,7 +42,8 @@ class RFWrapper:
     @staticmethod
     def evaluate(model_obj, X, y):
         preds = model_obj.predict(X)
-        rmse = float(mean_squared_error(y, preds, squared=False))
+        mse = _mse(y, preds)
+        rmse = float(np.sqrt(mse))
         mae = float(mean_absolute_error(y, preds))
         return {'rmse': rmse, 'mae': mae}
 

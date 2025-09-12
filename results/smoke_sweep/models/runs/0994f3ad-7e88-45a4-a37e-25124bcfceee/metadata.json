@@ -1,0 +1,12 @@
+{
+  "run_id": "0994f3ad-7e88-45a4-a37e-25124bcfceee",
+  "model_key": "catboost",
+  "tune": false,
+  "n_trials": 30,
+  "timestamp": 1757518979.367421,
+  "metrics": {
+    "rmse": 0.05629410703818404,
+    "mae": 0.04108391487369801
+  },
+  "duration_sec": 1.0211005210876465
+}

@@ -1,0 +1,12 @@
+{
+  "run_id": "3453e2ff-1d27-45d0-800f-a679f371ea77",
+  "model_key": "xgb",
+  "tune": false,
+  "n_trials": 30,
+  "timestamp": 1757300715.111723,
+  "metrics": {
+    "rmse": 0.06229681419610465,
+    "mae": 0.04731917997937062
+  },
+  "duration_sec": 0.03840208053588867
+}

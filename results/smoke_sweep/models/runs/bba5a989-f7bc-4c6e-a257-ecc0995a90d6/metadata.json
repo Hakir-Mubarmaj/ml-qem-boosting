@@ -1,0 +1,12 @@
+{
+  "run_id": "bba5a989-f7bc-4c6e-a257-ecc0995a90d6",
+  "model_key": "rf",
+  "tune": false,
+  "n_trials": 30,
+  "timestamp": 1757517752.571627,
+  "metrics": {
+    "rmse": 0.05853784131622502,
+    "mae": 0.04471142849205081
+  },
+  "duration_sec": 0.14713835716247559
+}

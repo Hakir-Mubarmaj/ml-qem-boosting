@@ -182,80 +182,117 @@ class FeatureEncoder:
     
 
     def fit(self, dataset: List[Dict[str, Any]], hardware_meta: Optional[Dict[str, Any]] = None):
-        """Fit internal transformations (scaler, PCA) using dataset.
-
-        dataset: list of example dicts (see module docstring)
-        hardware_meta: optional global hardware calibration info (dict)
         """
-        # build dataframe for this dataset & current families
-        df = self._build_df(dataset, hardware_meta)   # however your code builds df
-        # determine numeric columns once and store
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        Fit internal transformations (scaler, PCA) using the _encoded_ feature dataframe.
+        We call _build_dataframe(..., apply_pca=False) to produce raw features (DI_* etc.),
+        fit scaler and PCA (if requested), and record feature_names_ after applying PCA.
+        """
+        # Build encoded feature DataFrame (without PCA applied yet)
+        df_feat = self._build_dataframe(dataset, hardware_meta, apply_pca=False)
+
+        # numeric columns to be used for scaling
+        numeric_cols = df_feat.select_dtypes(include=[np.number]).columns.tolist()
         self.numeric_cols = numeric_cols
 
-        # fit scaler if applicable
+        # fit scaler
         if StandardScaler is not None and len(self.numeric_cols) > 0:
             self.scaler = StandardScaler()
-            self.scaler.fit(df[self.numeric_cols].values)
+            self.scaler.fit(df_feat[self.numeric_cols].values)
         else:
             self.scaler = None
 
-        # if using PCA on a particular block, compute & store pca_cols and fit pca
+        # Fit PCA on derived interaction columns if requested
         if self.pca_components is not None and 'derived_interactions' in self.families:
-            derived_cols = [c for c in df.columns if c.startswith('DI_')]
+            derived_cols = [c for c in df_feat.columns if c.startswith('DI_')]
             self.pca_cols = derived_cols
             if PCA is None:
-                raise RuntimeError('sklearn not available: cannot run PCA')
-            self.pca = PCA(n_components=self.pca_components)
-            # PCA expects a numeric array — use only derived_cols
+                raise RuntimeError('sklearn PCA not available: cannot run PCA')
             if len(self.pca_cols) > 0:
-                self.pca.fit(df[self.pca_cols].values)
+                self.pca = PCA(n_components=self.pca_components)
+                # defensive: fill NaN -> 0.0
+                self.pca.fit(df_feat[self.pca_cols].fillna(0.0).values)
+            else:
+                self.pca = None
+                self.pca_cols = []
         else:
             self.pca = None
             self.pca_cols = []
 
-        # save feature names in post-transform order
-        df2 = self._build_dataframe(dataset, hardware_meta, apply_pca=True)
-        self.feature_names_ = df2.columns.tolist()
+        # Save full post-transform feature order (apply_pca=True constructs final layout)
+        df_post = self._build_dataframe(dataset, hardware_meta, apply_pca=True)
+        # Ensure deterministic column ordering
+        try:
+            df_post = df_post.reindex(sorted(df_post.columns), axis=1)
+        except Exception:
+            pass
+        self.feature_names_ = df_post.columns.tolist()
         self._fitted = True
         return self
 
     def transform(self, dataset, hardware_meta=None):
         """
-        Transform dataset using previously fitted scaler/pca etc.
-        IMPORTANT: uses stored self.numeric_cols / self.pca_cols to ensure shape consistency.
+        Transform dataset using the previously fitted scaler and PCA.
+        Uses _build_dataframe to produce encoded features, then applies scaler & PCA
+        consistently with what was fitted.
         """
-        df = self._build_df(dataset, hardware_meta)  # builds same-named-feature df
-        # if scaler was fitted, apply on the same columns in same order
-        if self.scaler is not None and self.numeric_cols:
-            # Ensure all expected columns exist in df; if missing, add zeros (or nan->0) to keep shape
-            missing = [c for c in self.numeric_cols if c not in df.columns]
-            if missing:
-                # create missing columns with zeros so transform shape matches (or choose other fallback)
-                for c in missing:
-                    df[c] = 0.0
-            # Apply scaler to the stored columns in the stored order
-            df[self.numeric_cols] = self.scaler.transform(df[self.numeric_cols].values)
+        # Build encoded features (no PCA applied here yet)
+        df = self._build_dataframe(dataset, hardware_meta, apply_pca=False)
 
-        # If PCA was fitted, transform using stored pca and replace pca_cols by pca features
+        # Ensure numeric_cols exist in df (create missing with zeros)
+        if self.numeric_cols:
+            missing = [c for c in self.numeric_cols if c not in df.columns]
+            for c in missing:
+                df[c] = 0.0
+
+            if self.scaler is not None:
+                # scaler.transform expects the same order of columns used at fit time
+                df[self.numeric_cols] = self.scaler.transform(df[self.numeric_cols].values)
+            else:
+                # ensure numeric dtype
+                df[self.numeric_cols] = df[self.numeric_cols].astype(float, errors='ignore')
+
+        # Apply PCA if it was fitted during fit()
         if self.pca is not None and self.pca_cols:
+            # add missing pca cols with zeros
             missing_pca = [c for c in self.pca_cols if c not in df.columns]
-            if missing_pca:
-                for c in missing_pca:
-                    df[c] = 0.0
-            pca_vals = self.pca.transform(df[self.pca_cols].values)
-            # replace the pca_cols block with new columns name 'DI_pca_0'.. etc.
+            for c in missing_pca:
+                df[c] = 0.0
+            # transform
+            pca_vals = self.pca.transform(df[self.pca_cols].fillna(0.0).values)
             for i in range(pca_vals.shape[1]):
                 df[f'DI_PCA_{i}'] = pca_vals[:, i]
-            # optionally drop original pca_cols
+            # drop original DI_ cols
             df.drop(columns=self.pca_cols, inplace=True, errors='ignore')
+
+        # If fit() was called earlier, enforce final feature ordering & fill missing with zeros
+        if self._fitted and self.feature_names_:
+            for c in self.feature_names_:
+                if c not in df.columns:
+                    df[c] = 0.0
+            # reorder
+            df = df[self.feature_names_]
+
+        # Final sanity: drop any remaining non-numeric columns that accidentally slipped in
+        non_numeric = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
+        if non_numeric:
+            # convert if possible (e.g., JSON-strings of lists can't convert -> drop)
+            for c in non_numeric:
+                try:
+                    df[c] = pd.to_numeric(df[c], errors='raise')
+                except Exception:
+                    # last resort: drop these columns (they are not useful for numeric training)
+                    df.drop(columns=[c], inplace=True)
 
         return df
 
     def fit_transform(self, dataset, hardware_meta=None):
-        # Ensure fit stores column lists and transform uses them
+        """
+        Fit then transform convenience: ensures fit is performed on encoded features
+        and returns transformed numeric DataFrame.
+        """
         self.fit(dataset, hardware_meta=hardware_meta)
         return self.transform(dataset, hardware_meta=hardware_meta)
+
     
     def _build_dataframe(self, dataset: List[Dict[str, Any]], hardware_meta: Optional[Dict[str, Any]], apply_pca: bool) -> pd.DataFrame:
         """

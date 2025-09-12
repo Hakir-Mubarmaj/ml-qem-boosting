@@ -1,0 +1,12 @@
+{
+  "run_id": "b187c133-2206-4a5f-b7ab-08994b09e508",
+  "model_key": "lgbm",
+  "tune": false,
+  "n_trials": 30,
+  "timestamp": 1757517749.5831451,
+  "metrics": {
+    "rmse": 0.055389750867605246,
+    "mae": 0.0434147308681521
+  },
+  "duration_sec": 0.021546363830566406
+}
